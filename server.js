@@ -794,6 +794,156 @@ app.post('/hub/history/toggle/:userId', (req, res) => {
 });
 
 // =============================================================================
+// SIMULATE ALEXA TASK - FOR FRONTEND CLICKS
+// =============================================================================
+
+/**
+ * POST /hub/simulate-task
+ * Purpose: Simulate Alexa task execution from frontend clicks
+ * This allows clicking on task cards to trigger the same behavior as speaking to Alexa
+ */
+app.post('/hub/simulate-task', (req, res) => {
+  try {
+    const { userId, taskId, taskTitle } = req.body;
+
+    if (!userId || !taskId) {
+      return res.status(400).json({ 
+        ok: false, 
+        error: 'userId and taskId are required' 
+      });
+    }
+
+    const visitorId = getVisitorId(userId);
+    const existingState = getOrCreateHubState(visitorId);
+
+    // Determine the action and response based on taskId
+    let updatedState = { ...existingState };
+    let alexaResponse = '';
+    let utterance = '';
+
+    switch (taskId) {
+      case 't1': // Morning Routine
+        updatedState.activeTile = 'morning_routine';
+        updatedState.lastAction = 'MORNING_ROUTINE_STARTED';
+        updatedState.routineResult = {
+          lights: 'off',
+          thermostat: 20,
+          reminder: "Don't forget your keys!"
+        };
+        utterance = '"Alexa, start my morning routine"';
+        alexaResponse = 'Starting your morning routine. Turning off lights, setting thermostat to 20 degrees, and reminding you not to forget your keys.';
+        break;
+
+      case 't2': // Grocery List
+        updatedState.activeTile = 'grocery_list';
+        updatedState.lastAction = 'VIEW_GROCERY_LIST';
+        const groceryCount = (existingState.groceryList || []).length;
+        utterance = '"Alexa, show my grocery list"';
+        alexaResponse = groceryCount > 0 
+          ? `Your grocery list has ${groceryCount} items.`
+          : 'Your grocery list is empty. Say "add milk" to add an item.';
+        break;
+
+      case 't3': // Medication Reminder
+        updatedState.activeTile = 'medication_reminder';
+        updatedState.lastAction = 'MEDICATION_REMINDER';
+        updatedState.medicationStatus = {
+          morning: { name: 'Vitamin D, Omega-3', time: '8:00 AM', taken: true },
+          evening: { name: 'Blood pressure medication', time: '8:00 PM', taken: false }
+        };
+        utterance = '"Alexa, check my medications"';
+        alexaResponse = 'Here are your medication reminders. Morning vitamins were taken. Evening blood pressure medication is pending.';
+        break;
+
+      case 't4': // Control Lights
+        const currentLightState = existingState.lastAction === 'LIGHTS_ON' ? 'LIGHTS_OFF' : 'LIGHTS_ON';
+        updatedState.activeTile = 'control_lights';
+        updatedState.lastAction = currentLightState;
+        updatedState.lightsState = {
+          livingRoom: currentLightState === 'LIGHTS_ON',
+          bedroom: currentLightState === 'LIGHTS_ON',
+          kitchen: currentLightState === 'LIGHTS_ON',
+          bathroom: currentLightState === 'LIGHTS_ON'
+        };
+        utterance = currentLightState === 'LIGHTS_ON' ? '"Alexa, turn on the lights"' : '"Alexa, turn off the lights"';
+        alexaResponse = currentLightState === 'LIGHTS_ON' ? 'Turning on all the lights.' : 'Turning off all the lights.';
+        break;
+
+      case 't5': // Privacy Dashboard
+        updatedState.activeTile = 'privacy_dashboard';
+        updatedState.lastAction = 'SHOW_PRIVACY';
+        utterance = '"Alexa, show privacy settings"';
+        alexaResponse = 'Here are your privacy controls. You can say "turn microphone off" or "delete my history".';
+        break;
+
+      case 't6': // Evening Routine
+        updatedState.activeTile = 'evening_routine';
+        updatedState.lastAction = 'EVENING_ROUTINE_STARTED';
+        updatedState.routineResult = {
+          lights: 'dimmed',
+          thermostat: 19,
+          doors: 'locked',
+          sounds: 'sleep sounds playing'
+        };
+        utterance = '"Alexa, start my evening routine"';
+        alexaResponse = 'Starting your evening routine. Dimming lights to 30%, setting thermostat to 19 degrees, locking doors, and playing sleep sounds.';
+        break;
+
+      default:
+        return res.status(400).json({ ok: false, error: 'Unknown taskId' });
+    }
+
+    // Update debug info
+    updatedState.debugInfo = {
+      ...updatedState.debugInfo,
+      lastUpdated: new Date().toISOString(),
+      lastAlexaRequest: `SimulatedTask_${taskId}`,
+      simulatedFrom: 'frontend'
+    };
+
+    // Record in voice history
+    const historyEntry = {
+      id: `vh-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+      timestamp: new Date().toISOString(),
+      intent: updatedState.lastAction,
+      utterance: utterance,
+      response: alexaResponse,
+      category: getCategoryForAction(updatedState.lastAction),
+      activeTile: updatedState.activeTile,
+      simulated: true
+    };
+
+    if (!voiceHistoryByVisitor[visitorId]) {
+      voiceHistoryByVisitor[visitorId] = [];
+    }
+    voiceHistoryByVisitor[visitorId].unshift(historyEntry);
+    if (voiceHistoryByVisitor[visitorId].length > MAX_HISTORY_ENTRIES) {
+      voiceHistoryByVisitor[visitorId] = voiceHistoryByVisitor[visitorId].slice(0, MAX_HISTORY_ENTRIES);
+    }
+    updatedState.voiceHistory = voiceHistoryByVisitor[visitorId].slice(0, 10);
+
+    // Save state
+    hubStateByVisitorId[visitorId] = updatedState;
+
+    console.log(`[Hub] Simulated task ${taskId} (${taskTitle}) for visitor: ${visitorId}`);
+    console.log(`[Hub] Alexa response: ${alexaResponse}`);
+
+    return res.json({
+      ok: true,
+      state: updatedState,
+      alexaResponse: alexaResponse,
+      utterance: utterance,
+      taskId: taskId,
+      taskTitle: taskTitle
+    });
+
+  } catch (error) {
+    console.error('[Hub] Error simulating task:', error);
+    return res.status(500).json({ ok: false, error: 'Internal server error' });
+  }
+});
+
+// =============================================================================
 // HELPER FUNCTIONS
 // =============================================================================
 
@@ -840,19 +990,24 @@ function getCategoryForAction(action) {
     'MORNING_ROUTINE_STARTED': 'routine',
     'EVENING_ROUTINE': 'routine',
     'EVENING_ROUTINE_STARTED': 'routine',
+    'MEDICATION_REMINDER': 'health',
     'ADD_ITEM': 'grocery',
     'ADD_GROCERY_ITEM_REQUESTED': 'grocery',
     'ADD_GROCERY_ITEM_CONFIRMED': 'grocery',
     'CONFIRM_ITEM': 'grocery',
     'VIEW_GROCERY_LIST': 'grocery',
+    'OPEN_GROCERY_LIST': 'grocery',
     'CLEAR_GROCERY_LIST': 'grocery',
     'SHOW_PRIVACY': 'privacy',
+    'OPEN_PRIVACY_DASHBOARD': 'privacy',
     'TOGGLE_MICROPHONE': 'privacy',
     'TOGGLE_HISTORY': 'privacy',
     'DELETE_HISTORY': 'privacy',
     'LIGHTS_ON': 'home',
     'LIGHTS_OFF': 'home',
+    'CONTROL_LIGHTS': 'home',
     'SET_PROFILE': 'profile',
+    'SWITCH_PROFILE': 'profile',
     'LAUNCH': 'general',
     'HELP': 'general',
     'STOP': 'general',
@@ -904,6 +1059,7 @@ app.listen(PORT, () => {
   console.log(`    GET  /hub/state/:userId   - Get hub state for user`);
   console.log(`    POST /hub/state           - Update hub state`);
   console.log(`    POST /hub/reset           - Reset user's hub state`);
+  console.log(`    POST /hub/simulate-task   - Simulate Alexa task from frontend`);
   console.log(`    GET  /hub/users           - List all users (debug)`);
   console.log('');
   console.log('  Voice History endpoints:');
@@ -912,6 +1068,10 @@ app.listen(PORT, () => {
   console.log(`    DELETE /hub/history/:userId        - Delete all history`);
   console.log(`    DELETE /hub/history/:userId/:id    - Delete single entry`);
   console.log(`    POST   /hub/history/toggle/:userId - Enable/disable history`);
+  console.log('');
+  console.log('  Grocery endpoints:');
+  console.log(`    GET    /hub/grocery/all   - Get grocery items from all users`);
+  console.log(`    DELETE /hub/grocery/all   - Clear all grocery lists`);
   console.log('='.repeat(60));
 });
 

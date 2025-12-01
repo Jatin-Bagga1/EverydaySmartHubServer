@@ -247,7 +247,10 @@ app.get('/hub/state/:userId', (req, res) => {
     const visitorId = getVisitorId(userId);
     const hubState = getOrCreateHubState(visitorId);
 
-    console.log(`[Hub] Fetched state for visitor: ${visitorId}`);
+    // Only log for Alexa users to reduce noise from frontend polling
+    if (visitorId.startsWith('alexa-user-')) {
+      console.log(`[Hub] Fetched state for Alexa visitor: ${visitorId}`);
+    }
 
     return res.json(hubState);
 

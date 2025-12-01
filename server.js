@@ -488,6 +488,49 @@ app.get('/hub/history/all', (req, res) => {
 });
 
 /**
+ * DELETE /hub/history/all
+ * Purpose: Delete voice history from ALL users (for demo dashboard)
+ */
+app.delete('/hub/history/all', (req, res) => {
+  try {
+    let totalDeleted = 0;
+    const deletedFrom = [];
+    
+    // Clear history from all visitors
+    for (const visitorId of Object.keys(voiceHistoryByVisitor)) {
+      const count = voiceHistoryByVisitor[visitorId].length;
+      if (count > 0) {
+        totalDeleted += count;
+        deletedFrom.push(visitorId);
+      }
+      voiceHistoryByVisitor[visitorId] = [];
+      
+      // Also update hub state
+      if (hubStateByVisitorId[visitorId]) {
+        hubStateByVisitorId[visitorId].voiceHistory = [];
+        hubStateByVisitorId[visitorId].privacy = hubStateByVisitorId[visitorId].privacy || {};
+        hubStateByVisitorId[visitorId].privacy.lastHistoryDelete = new Date().toISOString();
+      }
+    }
+
+    console.log(`[Hub] Deleted ALL voice history: ${totalDeleted} entries from ${deletedFrom.length} users`);
+    console.log(`[Hub] Users affected: ${deletedFrom.join(', ') || 'none'}`);
+
+    return res.json({
+      ok: true,
+      message: `Deleted ${totalDeleted} history entries from ${deletedFrom.length} users`,
+      totalDeleted,
+      usersAffected: deletedFrom,
+      deletedAt: new Date().toISOString()
+    });
+
+  } catch (error) {
+    console.error('[Hub] Error deleting all history:', error);
+    return res.status(500).json({ ok: false, error: 'Internal server error' });
+  }
+});
+
+/**
  * GET /hub/history/:userId
  * Purpose: Get full voice history for a user
  */

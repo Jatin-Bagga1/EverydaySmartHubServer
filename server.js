@@ -46,6 +46,17 @@ let visitorCounter = 0;
 const registeredProfiles = {};
 
 /**
+ * Voice history storage - tracks all Alexa interactions
+ * Structure: { [visitorId]: [{ id, timestamp, intent, utterance, response, category }] }
+ */
+const voiceHistoryByVisitor = {};
+
+/**
+ * Maximum number of history entries to keep per user
+ */
+const MAX_HISTORY_ENTRIES = 100;
+
+/**
  * Predefined tasks for the Everyday Tasks Hub
  */
 const DEFAULT_TASKS = [
@@ -100,6 +111,7 @@ function createDefaultHubState(visitorId) {
       allowVoiceHistory: true,
       lastHistoryDelete: null
     },
+    voiceHistory: [], // Recent voice commands (synced from voiceHistoryByVisitor)
     tasks: [...DEFAULT_TASKS], // Copy of default tasks
     customTasks: [], // User-added tasks
     debugInfo: {
@@ -202,6 +214,37 @@ app.post('/hub/state', (req, res) => {
     updatedState.debugInfo.lastUpdated = new Date().toISOString();
     updatedState.debugInfo.isAlexaUser = userId.startsWith('amzn1.');
     updatedState.debugInfo.originalAlexaId = userId.startsWith('amzn1.') ? userId.substring(0, 30) + '...' : null;
+
+    // Record voice history if this is an Alexa request and history is enabled
+    if (userId.startsWith('amzn1.') && updatedState.privacy?.allowVoiceHistory !== false) {
+      const historyEntry = {
+        id: `vh-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+        timestamp: new Date().toISOString(),
+        intent: state?.lastAction || 'UNKNOWN',
+        utterance: state?.lastUtterance || getUtteranceForAction(state?.lastAction),
+        response: state?.lastResponse || null,
+        category: getCategoryForAction(state?.lastAction),
+        activeTile: state?.activeTile || updatedState.activeTile
+      };
+      
+      // Initialize history array if needed
+      if (!voiceHistoryByVisitor[visitorId]) {
+        voiceHistoryByVisitor[visitorId] = [];
+      }
+      
+      // Add to beginning (most recent first)
+      voiceHistoryByVisitor[visitorId].unshift(historyEntry);
+      
+      // Trim to max entries
+      if (voiceHistoryByVisitor[visitorId].length > MAX_HISTORY_ENTRIES) {
+        voiceHistoryByVisitor[visitorId] = voiceHistoryByVisitor[visitorId].slice(0, MAX_HISTORY_ENTRIES);
+      }
+      
+      // Sync recent history to hub state (last 10 entries for UI)
+      updatedState.voiceHistory = voiceHistoryByVisitor[visitorId].slice(0, 10);
+      
+      console.log(`[Hub] Recorded voice history: ${historyEntry.intent}`);
+    }
 
     // Store updated state
     hubStateByVisitorId[visitorId] = updatedState;
@@ -399,6 +442,236 @@ app.get('/hub/users', (req, res) => {
   });
 });
 
+// =============================================================================
+// VOICE HISTORY ROUTES
+// =============================================================================
+
+/**
+ * GET /hub/history/:userId
+ * Purpose: Get full voice history for a user
+ */
+app.get('/hub/history/:userId', (req, res) => {
+  try {
+    const { userId } = req.params;
+    const { limit = 50, offset = 0 } = req.query;
+
+    if (!userId) {
+      return res.status(400).json({ ok: false, error: 'userId is required' });
+    }
+
+    const visitorId = getVisitorId(userId);
+    const history = voiceHistoryByVisitor[visitorId] || [];
+    const hubState = hubStateByVisitorId[visitorId];
+    
+    // Check if user has disabled history
+    if (hubState?.privacy?.allowVoiceHistory === false) {
+      return res.json({
+        ok: true,
+        historyEnabled: false,
+        message: 'Voice history is disabled for this user',
+        history: [],
+        total: 0
+      });
+    }
+
+    const paginatedHistory = history.slice(Number(offset), Number(offset) + Number(limit));
+
+    return res.json({
+      ok: true,
+      historyEnabled: true,
+      visitorId,
+      total: history.length,
+      limit: Number(limit),
+      offset: Number(offset),
+      history: paginatedHistory
+    });
+
+  } catch (error) {
+    console.error('[Hub] Error fetching history:', error);
+    return res.status(500).json({ ok: false, error: 'Internal server error' });
+  }
+});
+
+/**
+ * DELETE /hub/history/:userId
+ * Purpose: Delete all voice history for a user
+ */
+app.delete('/hub/history/:userId', (req, res) => {
+  try {
+    const { userId } = req.params;
+
+    if (!userId) {
+      return res.status(400).json({ ok: false, error: 'userId is required' });
+    }
+
+    const visitorId = getVisitorId(userId);
+    
+    // Clear history
+    voiceHistoryByVisitor[visitorId] = [];
+    
+    // Update hub state
+    if (hubStateByVisitorId[visitorId]) {
+      hubStateByVisitorId[visitorId].voiceHistory = [];
+      hubStateByVisitorId[visitorId].privacy.lastHistoryDelete = new Date().toISOString();
+    }
+
+    console.log(`[Hub] Deleted voice history for visitor: ${visitorId}`);
+
+    return res.json({
+      ok: true,
+      message: 'Voice history deleted successfully',
+      deletedAt: new Date().toISOString()
+    });
+
+  } catch (error) {
+    console.error('[Hub] Error deleting history:', error);
+    return res.status(500).json({ ok: false, error: 'Internal server error' });
+  }
+});
+
+/**
+ * DELETE /hub/history/:userId/:entryId
+ * Purpose: Delete a specific history entry
+ */
+app.delete('/hub/history/:userId/:entryId', (req, res) => {
+  try {
+    const { userId, entryId } = req.params;
+
+    if (!userId || !entryId) {
+      return res.status(400).json({ ok: false, error: 'userId and entryId are required' });
+    }
+
+    const visitorId = getVisitorId(userId);
+    
+    if (!voiceHistoryByVisitor[visitorId]) {
+      return res.status(404).json({ ok: false, error: 'No history found for user' });
+    }
+
+    const initialLength = voiceHistoryByVisitor[visitorId].length;
+    voiceHistoryByVisitor[visitorId] = voiceHistoryByVisitor[visitorId].filter(entry => entry.id !== entryId);
+    
+    if (voiceHistoryByVisitor[visitorId].length === initialLength) {
+      return res.status(404).json({ ok: false, error: 'History entry not found' });
+    }
+
+    // Update hub state with recent history
+    if (hubStateByVisitorId[visitorId]) {
+      hubStateByVisitorId[visitorId].voiceHistory = voiceHistoryByVisitor[visitorId].slice(0, 10);
+    }
+
+    console.log(`[Hub] Deleted history entry ${entryId} for visitor: ${visitorId}`);
+
+    return res.json({
+      ok: true,
+      message: 'History entry deleted successfully'
+    });
+
+  } catch (error) {
+    console.error('[Hub] Error deleting history entry:', error);
+    return res.status(500).json({ ok: false, error: 'Internal server error' });
+  }
+});
+
+/**
+ * POST /hub/history/toggle/:userId
+ * Purpose: Enable or disable voice history recording
+ */
+app.post('/hub/history/toggle/:userId', (req, res) => {
+  try {
+    const { userId } = req.params;
+    const { enabled } = req.body;
+
+    if (!userId) {
+      return res.status(400).json({ ok: false, error: 'userId is required' });
+    }
+
+    const visitorId = getVisitorId(userId);
+    const hubState = getOrCreateHubState(visitorId);
+    
+    hubState.privacy = hubState.privacy || {};
+    hubState.privacy.allowVoiceHistory = enabled !== false;
+    
+    // If disabling, optionally clear history
+    if (enabled === false && req.body.clearHistory) {
+      voiceHistoryByVisitor[visitorId] = [];
+      hubState.voiceHistory = [];
+      hubState.privacy.lastHistoryDelete = new Date().toISOString();
+    }
+    
+    hubStateByVisitorId[visitorId] = hubState;
+
+    console.log(`[Hub] Voice history ${enabled ? 'enabled' : 'disabled'} for visitor: ${visitorId}`);
+
+    return res.json({
+      ok: true,
+      historyEnabled: hubState.privacy.allowVoiceHistory,
+      message: `Voice history ${enabled ? 'enabled' : 'disabled'} successfully`
+    });
+
+  } catch (error) {
+    console.error('[Hub] Error toggling history:', error);
+    return res.status(500).json({ ok: false, error: 'Internal server error' });
+  }
+});
+
+// =============================================================================
+// HELPER FUNCTIONS
+// =============================================================================
+
+/**
+ * Helper: Get utterance description for an action
+ */
+function getUtteranceForAction(action) {
+  const utteranceMap = {
+    'LAUNCH': 'Open Everyday Tasks Hub',
+    'MORNING_ROUTINE': 'Start my morning routine',
+    'EVENING_ROUTINE': 'Start my evening routine',
+    'ADD_GROCERY_ITEM_REQUESTED': 'Add item to grocery list',
+    'ADD_GROCERY_ITEM_CONFIRMED': 'Confirmed adding item',
+    'VIEW_GROCERY_LIST': 'Show my grocery list',
+    'CLEAR_GROCERY_LIST': 'Clear grocery list',
+    'SHOW_PRIVACY': 'Show privacy settings',
+    'TOGGLE_MICROPHONE': 'Toggle microphone',
+    'TOGGLE_HISTORY': 'Toggle voice history',
+    'DELETE_HISTORY': 'Delete voice history',
+    'LIGHTS_ON': 'Turn on the lights',
+    'LIGHTS_OFF': 'Turn off the lights',
+    'SET_PROFILE': 'Switch profile',
+    'HELP': 'Help',
+    'STOP': 'Stop',
+    'CANCEL': 'Cancel'
+  };
+  return utteranceMap[action] || action || 'Voice command';
+}
+
+/**
+ * Helper: Get category for an action
+ */
+function getCategoryForAction(action) {
+  if (!action) return 'general';
+  
+  const categoryMap = {
+    'MORNING_ROUTINE': 'routine',
+    'EVENING_ROUTINE': 'routine',
+    'ADD_GROCERY_ITEM_REQUESTED': 'grocery',
+    'ADD_GROCERY_ITEM_CONFIRMED': 'grocery',
+    'VIEW_GROCERY_LIST': 'grocery',
+    'CLEAR_GROCERY_LIST': 'grocery',
+    'SHOW_PRIVACY': 'privacy',
+    'TOGGLE_MICROPHONE': 'privacy',
+    'TOGGLE_HISTORY': 'privacy',
+    'DELETE_HISTORY': 'privacy',
+    'LIGHTS_ON': 'home',
+    'LIGHTS_OFF': 'home',
+    'SET_PROFILE': 'profile',
+    'LAUNCH': 'general',
+    'HELP': 'general',
+    'STOP': 'general',
+    'CANCEL': 'general'
+  };
+  return categoryMap[action] || 'general';
+}
+
 /**
  * Helper: Get avatar emoji based on name
  */
@@ -443,6 +716,12 @@ app.listen(PORT, () => {
   console.log(`    POST /hub/state           - Update hub state`);
   console.log(`    POST /hub/reset           - Reset user's hub state`);
   console.log(`    GET  /hub/users           - List all users (debug)`);
+  console.log('');
+  console.log('  Voice History endpoints:');
+  console.log(`    GET    /hub/history/:userId        - Get voice history`);
+  console.log(`    DELETE /hub/history/:userId        - Delete all history`);
+  console.log(`    DELETE /hub/history/:userId/:id    - Delete single entry`);
+  console.log(`    POST   /hub/history/toggle/:userId - Enable/disable history`);
   console.log('='.repeat(60));
 });
 

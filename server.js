@@ -447,6 +447,47 @@ app.get('/hub/users', (req, res) => {
 // =============================================================================
 
 /**
+ * GET /hub/history/all
+ * Purpose: Get voice history from ALL Alexa users (for demo dashboard)
+ */
+app.get('/hub/history/all', (req, res) => {
+  try {
+    const { limit = 50 } = req.query;
+    
+    // Collect history from all visitors
+    let allHistory = [];
+    
+    for (const [visitorId, history] of Object.entries(voiceHistoryByVisitor)) {
+      const profile = registeredProfiles[visitorId];
+      const enrichedHistory = history.map(entry => ({
+        ...entry,
+        visitorId,
+        userName: profile?.name || visitorId
+      }));
+      allHistory = allHistory.concat(enrichedHistory);
+    }
+    
+    // Sort by timestamp (most recent first)
+    allHistory.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+    
+    // Limit results
+    allHistory = allHistory.slice(0, Number(limit));
+
+    console.log(`[Hub] Fetched all voice history: ${allHistory.length} entries`);
+
+    return res.json({
+      ok: true,
+      total: allHistory.length,
+      history: allHistory
+    });
+
+  } catch (error) {
+    console.error('[Hub] Error fetching all history:', error);
+    return res.status(500).json({ ok: false, error: 'Internal server error' });
+  }
+});
+
+/**
  * GET /hub/history/:userId
  * Purpose: Get full voice history for a user
  */
@@ -623,25 +664,30 @@ app.post('/hub/history/toggle/:userId', (req, res) => {
  */
 function getUtteranceForAction(action) {
   const utteranceMap = {
-    'LAUNCH': 'Open Everyday Tasks Hub',
-    'MORNING_ROUTINE': 'Start my morning routine',
-    'EVENING_ROUTINE': 'Start my evening routine',
-    'ADD_GROCERY_ITEM_REQUESTED': 'Add item to grocery list',
-    'ADD_GROCERY_ITEM_CONFIRMED': 'Confirmed adding item',
-    'VIEW_GROCERY_LIST': 'Show my grocery list',
-    'CLEAR_GROCERY_LIST': 'Clear grocery list',
-    'SHOW_PRIVACY': 'Show privacy settings',
-    'TOGGLE_MICROPHONE': 'Toggle microphone',
-    'TOGGLE_HISTORY': 'Toggle voice history',
-    'DELETE_HISTORY': 'Delete voice history',
-    'LIGHTS_ON': 'Turn on the lights',
-    'LIGHTS_OFF': 'Turn off the lights',
-    'SET_PROFILE': 'Switch profile',
-    'HELP': 'Help',
-    'STOP': 'Stop',
-    'CANCEL': 'Cancel'
+    'OPEN_HUB': '"Alexa, open everyday tasks hub"',
+    'LAUNCH': '"Alexa, open everyday tasks hub"',
+    'MORNING_ROUTINE': '"Start my morning routine"',
+    'MORNING_ROUTINE_STARTED': '"Start my morning routine"',
+    'EVENING_ROUTINE': '"Start my evening routine"',
+    'EVENING_ROUTINE_STARTED': '"Start my evening routine"',
+    'ADD_ITEM': '"Add [item] to grocery list"',
+    'ADD_GROCERY_ITEM_REQUESTED': '"Add [item] to grocery list"',
+    'ADD_GROCERY_ITEM_CONFIRMED': '"Yes" (confirmed adding item)',
+    'CONFIRM_ITEM': '"Yes" (confirmed)',
+    'VIEW_GROCERY_LIST': '"Show my grocery list"',
+    'CLEAR_GROCERY_LIST': '"Clear grocery list"',
+    'SHOW_PRIVACY': '"Show privacy settings"',
+    'TOGGLE_MICROPHONE': '"Turn microphone off/on"',
+    'TOGGLE_HISTORY': '"Toggle voice history"',
+    'DELETE_HISTORY': '"Delete my voice history"',
+    'LIGHTS_ON': '"Turn on the lights"',
+    'LIGHTS_OFF': '"Turn off the lights"',
+    'SET_PROFILE': '"Call me [name]"',
+    'HELP': '"Help"',
+    'STOP': '"Stop"',
+    'CANCEL': '"Cancel"'
   };
-  return utteranceMap[action] || action || 'Voice command';
+  return utteranceMap[action] || `"${action || 'Voice command'}"`;
 }
 
 /**
@@ -651,10 +697,15 @@ function getCategoryForAction(action) {
   if (!action) return 'general';
   
   const categoryMap = {
+    'OPEN_HUB': 'general',
     'MORNING_ROUTINE': 'routine',
+    'MORNING_ROUTINE_STARTED': 'routine',
     'EVENING_ROUTINE': 'routine',
+    'EVENING_ROUTINE_STARTED': 'routine',
+    'ADD_ITEM': 'grocery',
     'ADD_GROCERY_ITEM_REQUESTED': 'grocery',
     'ADD_GROCERY_ITEM_CONFIRMED': 'grocery',
+    'CONFIRM_ITEM': 'grocery',
     'VIEW_GROCERY_LIST': 'grocery',
     'CLEAR_GROCERY_LIST': 'grocery',
     'SHOW_PRIVACY': 'privacy',
@@ -718,6 +769,7 @@ app.listen(PORT, () => {
   console.log(`    GET  /hub/users           - List all users (debug)`);
   console.log('');
   console.log('  Voice History endpoints:');
+  console.log(`    GET    /hub/history/all           - Get ALL users history`);
   console.log(`    GET    /hub/history/:userId        - Get voice history`);
   console.log(`    DELETE /hub/history/:userId        - Delete all history`);
   console.log(`    DELETE /hub/history/:userId/:id    - Delete single entry`);
